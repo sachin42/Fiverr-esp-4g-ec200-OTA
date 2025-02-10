@@ -5,7 +5,7 @@
 #define MODEM_RX_PIN (16)
 #define SerialAT Serial1
 #define TINY_GSM_RX_BUFFER 1024 // Set RX buffer to 1Kb
-// #define DUMP_AT_COMMANDS
+#define DUMP_AT_COMMANDS
 
 #define FIRMWARE "1.2.6"
 
@@ -239,14 +239,6 @@ void setup()
         delay(1000);
     }
 
-    // if (!modem.setNetworkMode(MODEM_NETWORK_LTE))
-    // {
-    //     Serial.println("Set network mode failed!");
-    // }
-    // String mode = modem.getNetworkModes();
-    // Serial.print("Current network mode : ");
-    // Serial.println(mode);
-
 #ifdef APN
     // Serial.printf("Set network apn : %s\n", APN);
     modem.sendAT(GF("AT+QICSGP=1,1,\"" APN "\",\"" user "\",\"" pass "\",1"));
@@ -273,7 +265,8 @@ void setup()
             break;
         case REG_DENIED:
             Serial.println("Network registration was rejected, please check if the APN is correct");
-            return;
+            // return;
+            break;
         case REG_OK_HOME:
             Serial.println("Online registration successful");
             break;
@@ -288,18 +281,12 @@ void setup()
     }
     Serial.println();
 
-    // Serial.printf("Registration Status:%d\n", status);
-    // delay(1000);
-    // String ueInfo;
-    // if (modem.getSystemInformation(ueInfo))
-    // {
-    //     Serial.print("Inquiring UE system information:");
-    //     Serial.println(ueInfo);
-    // }
-    // if (!modem.setNetworkActive())
-    // {
-    //     Serial.println("Enable network failed!");
-    // }
+    String ueInfo;
+    if (modem.getSystemInformation(ueInfo))
+    {
+        Serial.print("Inquiring UE system information:");
+        Serial.println(ueInfo);
+    }
 
     delay(5000);
 

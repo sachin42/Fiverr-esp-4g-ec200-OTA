@@ -168,7 +168,6 @@ public:
         return header;
     }
 
-
     int https_body(uint8_t *buffer, int buffer_size)
     {
         if (!buffer || !buffer_size) {

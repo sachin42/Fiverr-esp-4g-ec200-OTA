@@ -21,11 +21,17 @@ enum HttpContentType {
 
 template <class modemType>
 class TinyGsmHttpsEC200U {
+ private:
+  size_t _length;
+  String _headers;
+  int _timeout;
+
  public:
   /*
    * Basic functions
    */
   bool https_begin() {
+    _length = 0;
     https_end();  // Ensure any previous session is closed
 
     // Activate PDP Context
@@ -48,6 +54,7 @@ class TinyGsmHttpsEC200U {
 
   void https_end() {
     // Deactivate PDP Context
+    _length = 0;
     thisModem().sendAT("+QIDEACT=1");
     thisModem().waitResponse();
   }
@@ -65,26 +72,15 @@ class TinyGsmHttpsEC200U {
     return thisModem().waitResponse() == 1;
   }
 
-  //   bool https_set_timeout(uint8_t timeout_seconds = 60) {
-  //     // Set HTTP(S) request timeout (EC200U uses "reqtimeout")
-  //     thisModem().sendAT("+QHTTPCFG=\"reqtimeout\",", timeout_seconds);
-  //     return thisModem().waitResponse() == 1;
-  //   }
-
-  //   bool https_set_user_agent(const String& userAgent) {
-  //     // Set User-Agent for HTTP requests
-  //     thisModem().sendAT("+QHTTPCFG=\"useragent\",\"", userAgent, "\"");
-  //     return thisModem().waitResponse() == 1;
-  //   }
+  void https_set_timeout(int timeout) {
+    // Set the timeout for the HTTP request
+    _timeout = timeout;
+  }
 
   bool https_set_content_type(HttpContentType type) {
     // Send the mapped content type
     thisModem().sendAT("+QHTTPCFG=\"contenttype\",", static_cast<int>(type));
     return thisModem().waitResponse(3000) == 1;
-  }
-
-  bool https_set_accept_type(const char* acceptType) {
-    return https_add_header("Accept", acceptType);
   }
 
   bool https_set_ssl_index(uint8_t sslId) {
@@ -100,6 +96,7 @@ class TinyGsmHttpsEC200U {
   }
 
   bool https_set_break() {
+    _length = 0;
     // Cancel any ongoing HTTP request
     thisModem().sendAT("+QHTTPSTOP");
     return thisModem().waitResponse(5000) == 1;
@@ -124,43 +121,14 @@ class TinyGsmHttpsEC200U {
       DBG(length);
 
       if (bodyLength) { *bodyLength = length; }
-
+      _length = length;
       return status;  // Return the HTTP status code
     }
     return -1;
   }
 
   String https_header() {
-    // Read the response (including headers)
-    thisModem().sendAT("+QHTTPREAD=0,512");  // Read up to 512 bytes (adjust if needed)
-    if (thisModem().waitResponse(5000, "+QHTTPREAD: ") != 1) { return ""; }
-
-    int length = thisModem().streamGetIntBefore('\n');  // Get response length
-    if (length <= 0) { return ""; }
-
-    uint8_t* buffer = (uint8_t*)TINY_GSM_MALLOC(length + 1);
-    if (!buffer) { return ""; }
-
-    if (thisModem().stream.readBytes(buffer, length) != length) {
-      free(buffer);
-      return "";
-    }
-
-    buffer[length] = '\0';
-
-    // Find the separator between headers and body (`\r\n\r\n`)
-    char* headerEnd = strstr((char*)buffer, "\r\n\r\n");
-    if (!headerEnd) {
-      free(buffer);
-      return "";
-    }
-
-    // Extract only the headers
-    int    headerLength = headerEnd - (char*)buffer;
-    String header       = String((const char*)buffer, headerLength);
-    free(buffer);
-
-    return header;
+    return _header;
   }
 
   int https_body(uint8_t* buffer, int buffer_size) {
@@ -221,67 +189,8 @@ class TinyGsmHttpsEC200U {
     return copyLength;  // Return the number of bytes copied
   }
 
-  String https_body() {
-    int    offset = 0;
-    size_t total  = https_get_size();
-    if (total == 0) { return ""; }
-
-    uint8_t* buffer = (uint8_t*)TINY_GSM_MALLOC(total + 1);
-    if (!buffer) {
-      thisModem().stream.flush();
-      return "";
-    }
-
-    // Read response (headers + body)
-    thisModem().sendAT("+QHTTPREAD=0,", total);
-    if (thisModem().waitResponse(3000) != 1) {
-      free(buffer);
-      return "";
-    }
-
-    do {
-      if (thisModem().waitResponse(30000UL, "+QHTTPREAD: ") != 1) {
-        free(buffer);
-        return "";
-      }
-
-      int length = thisModem().streamGetIntBefore('\n');
-      if (thisModem().stream.readBytes(buffer + offset, length) != length) {
-        free(buffer);
-        return "";
-      }
-
-      offset += length;
-    } while (total != offset);
-
-    thisModem().waitResponse(5000UL, "+QHTTPREAD: 0");
-    buffer[total] = '\0';
-
-    // Find the separator between headers and body (`\r\n\r\n`)
-    char* headerEnd = strstr((char*)buffer, "\r\n\r\n");
-    if (!headerEnd) {
-      free(buffer);
-      return "";  // No valid response
-    }
-
-    // Move pointer to start of body
-    String body = String((const char*)(headerEnd + 4));  // Skip "\r\n\r\n"
-    free(buffer);
-
-    return body;
-  }
-
   size_t https_get_size() {
-    // Send command to get the response size
-    thisModem().sendAT("+QHTTPREAD?");
-    if (thisModem().waitResponse(120000UL, "+QHTTPREAD: LEN,") != 1) {
-      return 0;  // Failed to get size
-    }
-
-    size_t length = thisModem().streamGetLongLongBefore('\r');
-    thisModem().stream.flush();
-
-    return length;
+    return _length;
   }
 
   int https_post(uint8_t* payload, size_t size, uint32_t inputTimeout = 10000) {

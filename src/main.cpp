@@ -1,91 +1,74 @@
-#define TINY_GSM_MODEM_EC200U
-
-#define MODEM_TX_PIN (17)
-#define MODEM_RX_PIN (16)
+#define TINY_GSM_MODEM_SIM7600
+// #define TINY_GSM_MODEM_EC200U
+#define SerialMon Serial
 #define SerialAT Serial1
-#define TINY_GSM_RX_BUFFER 1024 // Set RX buffer to 1Kb
-#define DUMP_AT_COMMANDS
 
-#define FIRMWARE "1.2.6"
+#if !defined(TINY_GSM_RX_BUFFER)
+#define TINY_GSM_RX_BUFFER 1024
+#endif
 
-#include <TinyGsmClient.h>
-#include <Update.h>
-#include <ArduinoHttpClient.h>
+// See all AT commands, if wanted
+// #define DUMP_AT_COMMANDS
 
+#define TINY_GSM_DEBUG SerialMon
+// #define LOGGING  // <- Logging is for the HTTP library
+#define GSM_BAUD 115200
+
+// Add a reception delay, if needed.
+// This may be needed for a fast processor at a slow baud rate.
+// #define TINY_GSM_YIELD() \
+//     {                    \
+//         delay(2);        \
+//     }
+// Define how you're planning to connect to the internet
+// These defines are only for this example; they are not needed in other code.
+#define TINY_GSM_USE_GPRS true
+
+// set GSM PIN, if any
+#define GSM_PIN ""
+
+// Your GPRS credentials, if any
+// const char apn[] = "airteliot.com";
+const char apn[] = "airtelgprs.com";
+const char user[] = "";
+const char pass[] = "";
+
+// Server details
 const char *server_url = "protocol.electrocus.com"; // Extract host from URL
 const int server_port = 8000;
 const char *firmware_path = "/firmware.bin"; // Extract file path
 
-#ifdef DUMP_AT_COMMANDS // if enabled it requires the streamDebugger lib
+#include <TinyGsmClient.h>
+#include <ArduinoHttpClient.h>
+#include <Update.h>
+
+#ifdef DUMP_AT_COMMANDS
 #include <StreamDebugger.h>
-StreamDebugger debugger(SerialAT, Serial);
+StreamDebugger debugger(SerialAT, SerialMon);
 TinyGsm modem(debugger);
 #else
 TinyGsm modem(SerialAT);
 #endif
 
-#define APN "airtelgprs.com" // Replace with your APN
-#define user ""              // Replace with your APN username (if any)
-#define pass ""              // Replace with your APN password (if any)
+// Number of milliseconds to wait without receiving any data before we give up
+const int kNetworkTimeout = 30 * 1000;
+// Number of milliseconds to wait if no data is available before trying again
+const int kNetworkDelay = 1000;
 
-bool otaBegin = false;
-TaskHandle_t ota_task_handle = NULL;
-
-void blink_task(void *pv)
+void powerOn()
 {
-    pinMode(2, OUTPUT);
-    while (true)
-    {
-        digitalWrite(2, HIGH);
-        delay(100);
-        digitalWrite(2, LOW);
-        delay(100);
-    }
-    vTaskDelete(NULL);
+    pinMode(4, OUTPUT);
+    digitalWrite(4, HIGH);
+    delay(300); // Need delay
+    digitalWrite(4, LOW);
 }
 
-static void __attribute__((noreturn)) task_fatal_error(void)
+void ota_task()
 {
-    Serial.println("Exiting task due to fatal error...");
-    ota_task_handle = NULL;
-    vTaskDelete(NULL);
-    while (1) {}
-}
-
-bool isFirmwareUpdateAvailable(const String &header, const String &currentVersion)
-{
-    String newVersion = "";
-    int index = header.indexOf("X-Firmware-Version: ");
-    if (index != -1)
-    {
-        index += 20;
-        int endIndex = header.indexOf("\r\n", index);
-        if (endIndex == -1)
-            endIndex = header.length();
-        newVersion = header.substring(index, endIndex);
-    }
-
-    if (newVersion.length() == 0)
-    {
-        Serial.println("No firmware version found in header.");
-        return false;
-    }
-
-    Serial.print("Current Firmware: ");
-    Serial.println(currentVersion);
-    Serial.print("Available Firmware: ");
-    Serial.println(newVersion);
-
-    return newVersion > currentVersion;
-}
-
-void ota_task(void *pv)
-{
-    Serial.println("Connecting to GPRS...");
-    if (!modem.gprsConnect(APN, user, pass))
+    if (!modem.isGprsConnected())
     {
         Serial.println("Failed to connect to GPRS!");
-        task_fatal_error();
+        return;
     }
     Serial.println("Connected to GPRS!");
 
@@ -93,22 +76,19 @@ void ota_task(void *pv)
     HttpClient http(client, server_url, server_port);
 
     Serial.println("Sending GET request...");
-    http.get(firmware_path);
-
+    if (http.get(firmware_path) != 0)
+    {
+        Serial.println("Connection Failed");
+        http.stop();
+        return;
+    }
     int httpCode = http.responseStatusCode();
     if (httpCode != 200)
     {
         Serial.print("HTTP GET failed! Error code = ");
         Serial.println(httpCode);
-        modem.gprsDisconnect();
-        task_fatal_error();
-    }
-
-    String headers = http.readString();
-    if (!isFirmwareUpdateAvailable(headers, FIRMWARE))
-    {
-        modem.gprsDisconnect();
-        task_fatal_error();
+        http.stop();
+        return;
     }
 
     size_t firmware_size = http.contentLength();
@@ -120,104 +100,170 @@ void ota_task(void *pv)
     if (!Update.begin(firmware_size))
     {
         Serial.println("Not enough space for OTA!");
-        modem.gprsDisconnect();
-        task_fatal_error();
+        http.stop();
+        return;
     }
 
-    uint8_t buffer[1024];
-    int total = 0, progress = 0;
+    // size_t written = Update.writeStream(http);
+    // if (written == firmware_size)
+    // {
+    //     Serial.println("Firmware downloaded successfully.");
+    // }
+    // else
+    // {
+    //     Serial.printf("Download error: %d/%d bytes written.\n", written, firmware_size);
+    // }
 
-    while (total < firmware_size)
+    // uint8_t buffer[1024];
+    // int total = 0, progress = 0;
+
+    // while (total < firmware_size)
+    // {
+    //     int len = http.readBytes(buffer, sizeof(buffer));
+    //     if (len <= 0)
+    //         break;
+
+    //     int written = Update.write(buffer, len);
+    //     if (written != len)
+    //     {
+    //         Serial.println("Write error! Retry?");
+    //     }
+
+    //     // Serial.printf(" %d / %d", len, written);
+    //     total += written;
+    //     // int newProgress = (total * 100) / firmware_size;
+    //     // if (newProgress - progress >= 5 || newProgress == 100)
+    //     // {
+    //     progress = (total * 100) / firmware_size;
+    //     Serial.printf(" %d / %d", total, firmware_size);
+    //     Serial.print(String("\r ") + progress + "%\n");
+    // }
+    // // }
+
+    uint8_t buffer[512]; // Chunk buffer
+    size_t totalBytes = 0;
+    int progress = 0;
+
+    unsigned long timeoutStart;
+    timeoutStart = millis();
+    while ((http.connected() || http.available()) && totalBytes < firmware_size)
     {
-        int len = http.readBytes(buffer, sizeof(buffer));
-        if (len <= 0)
-            break;
+        int len = 0;
 
-        int written = Update.write(buffer, len);
-        if (written != len)
+        // If data is available, read into the buffer in chunks
+        while (http.available() && len < sizeof(buffer))
         {
-            Serial.println("Write error! Retry?");
+            buffer[len++] = http.read();
+            timeoutStart = millis(); // Reset timeout on every byte
         }
 
-        total += written;
-        int newProgress = (total * 100) / firmware_size;
-        if (newProgress - progress >= 5 || newProgress == 100)
+        if (len > 0)
         {
-            progress = newProgress;
-            Serial.print(String("\r ") + progress + "%\n");
+            int written = Update.write(buffer, len);
+            if (written != len)
+            {
+                SerialMon.println("Write error!");
+                Update.abort();
+                http.stop();
+                return;
+            }
+
+            totalBytes += written;
+            int newProgress = (totalBytes * 100) / firmware_size;
+            if (newProgress - progress >= 5 || newProgress == 100)
+            {
+                progress = newProgress;
+                SerialMon.print("\r ");
+                SerialMon.print(progress);
+                SerialMon.println("%");
+            }
         }
+
+        // Timeout if no data for a while
+        if ((millis() - timeoutStart) > kNetworkTimeout)
+        {
+            SerialMon.println("Network timeout. Aborting OTA.");
+            Update.abort();
+            http.stop();
+            return;
+        }
+
+        // Delay if nothing is available to avoid tight looping
+        if (!http.available())
+        {
+            delay(kNetworkDelay);
+        }
+    }
+
+    if (totalBytes < firmware_size)
+    {
+        SerialMon.println("Incomplete firmware received!");
+        Update.abort();
+        http.stop();
+        return;
     }
 
     if (!Update.end() || !Update.isFinished())
     {
         Serial.println("Update failed!");
-        modem.gprsDisconnect();
-        task_fatal_error();
+        Update.printError(Serial);
+        http.stop();
+        return;
     }
 
     Serial.println("Update completed! Rebooting...");
-    delay(1500);
+    http.stop();
     modem.gprsDisconnect();
-    ota_task_handle = NULL;
+    delay(1500);
     ESP.restart();
-    vTaskDelete(NULL);
-}
-
-void IRAM_ATTR handleInterrupt()
-{
-    otaBegin = true;
 }
 
 void setup()
 {
-    Serial.begin(115200);
-    Serial.println("Firmware version: " + String(FIRMWARE));
-    SerialAT.begin(115200, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
-
-    int retry = 0;
-    while (!modem.testAT(1000))
+    SerialMon.begin(115200);
+    SerialAT.begin(115200, SERIAL_8N1, 26, 27);
+    powerOn();
+    delay(6000);
+    SerialMon.println("Initializing modem...");
+    modem.init();
+    // Unlock your SIM card with a PIN if needed
+    if (GSM_PIN && modem.getSimStatus() != 3)
+        modem.simUnlock(GSM_PIN);
+#ifdef TINY_GSM_MODEM_SIM7600
+    modem.setNetworkMode(13);
+#endif
+    SerialMon.print("Waiting for network...");
+    if (!modem.waitForNetwork())
     {
-        Serial.print(".");
-        if (retry++ > 10)
-        {
-            delay(1000);
-            retry = 0;
-        }
+        SerialMon.println(" fail");
+        delay(10000);
+        return;
     }
-    Serial.println();
-
-    // Check SIM status
-    while (modem.getSimStatus() != SIM_READY)
+    if (modem.isNetworkConnected())
     {
-        Serial.println("Waiting for SIM...");
-        delay(1000);
+        SerialMon.println("Network connected");
     }
-
-    // Configure APN
-    modem.sendAT(GF("AT+QICSGP=1,1,\"" APN "\",\"" user "\",\"" pass "\",1"));
-    modem.waitResponse();
-
-    // Network registration
-    Serial.println("Waiting for network...");
-    while (modem.getRegistrationStatus() <= REG_SEARCHING)
+    if (!modem.gprsConnect(apn, user, pass))
     {
-        Serial.printf("Signal Quality: %d\n", modem.getSignalQuality());
-        delay(1000);
+        SerialMon.println(" fail");
+        delay(10000);
+        return;
+    }
+    if (modem.isGprsConnected())
+    {
+        SerialMon.println("GPRS connected");
     }
 
-    Serial.println("Network ready!");
-    Serial.println("IP Address: " + modem.getLocalIP());
-
-    xTaskCreate(blink_task, "blink_task", 1024, NULL, 5, NULL);
-    pinMode(23, INPUT_PULLUP);
-    attachInterrupt(23, handleInterrupt, FALLING);
+    Serial.println("OTA 4");
+    pinMode(34, INPUT);
 }
 
 void loop()
 {
-    if (otaBegin && ota_task_handle == NULL)
+    if (digitalRead(34) == LOW)
     {
-        xTaskCreatePinnedToCore(ota_task, "ota_task", 1024 * 8, NULL, 5, &ota_task_handle, 1);
-        otaBegin = false;
+        delay(500);
+        Serial.println("OTA starting ");
+        ota_task();
     }
 }

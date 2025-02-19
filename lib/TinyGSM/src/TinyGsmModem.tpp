@@ -448,7 +448,7 @@ class TinyGsmModem {
     }
   }
 
- protected:
+//  protected:
   inline bool streamGetLength(char* buf, int8_t numChars,
                               const uint32_t timeout_ms = 1000L) {
     if (!buf) { return false; }

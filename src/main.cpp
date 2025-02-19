@@ -65,158 +65,145 @@ void powerOn()
 
 void ota_task()
 {
-    if (!modem.isGprsConnected())
-    {
-        Serial.println("Failed to connect to GPRS!");
-        return;
-    }
-    Serial.println("Connected to GPRS!");
+    const char *firmware_url = "http://protocol.electrocus.com:8000/firmware.bin";
+    const size_t chunk_size = 512; // Small chunks to avoid buffer overrun
+    const unsigned long read_timeout = 180; // Timeout for large firmware
 
-    TinyGsmClient client(modem);
-    HttpClient http(client, server_url, server_port);
+    SerialMon.println("Starting OTA via EC200U HTTP AT Commands...");
 
-    Serial.println("Sending GET request...");
-    if (http.get(firmware_path) != 0)
+    // 1. Configure PDP Context (already activated in setup, assumed)
+    modem.sendAT("+QHTTPCFG=\"contextid\",1");
+    if (modem.waitResponse() != 1)
     {
-        Serial.println("Connection Failed");
-        http.stop();
-        return;
-    }
-    int httpCode = http.responseStatusCode();
-    if (httpCode != 200)
-    {
-        Serial.print("HTTP GET failed! Error code = ");
-        Serial.println(httpCode);
-        http.stop();
+        SerialMon.println("Failed to configure PDP context");
         return;
     }
 
-    size_t firmware_size = http.contentLength();
-    Serial.print("Firmware size: ");
-    Serial.print(firmware_size / 1024);
-    Serial.println(" KB");
+    // 2. Enable Response Headers (optional, useful for version check)
+    modem.sendAT("+QHTTPCFG=\"responseheader\",1");
+    modem.waitResponse();
 
-    Serial.println("Starting firmware update...");
-    if (!Update.begin(firmware_size))
+    // 3. Set URL Length and Timeout (60s timeout for slow network)
+    modem.sendAT("+QHTTPURL=", strlen(firmware_url), ",60");
+    if (modem.waitResponse("CONNECT") != 1)
     {
-        Serial.println("Not enough space for OTA!");
-        http.stop();
+        SerialMon.println("Failed to set HTTP URL");
+        return;
+    }
+    modem.stream.print(firmware_url);
+    modem.stream.write(0x1A); // SEND CTRL+Z to terminate URL input
+    if (modem.waitResponse() != 1)
+    {
+        SerialMon.println("Failed to send HTTP URL");
+        return;
+    }
+    
+    // 4. Send GET Request (180s timeout to handle slow downloads)
+    modem.sendAT("+QHTTPGET=", read_timeout);
+    if (modem.waitResponse() != 1)
+    {
+        SerialMon.println("HTTP GET failed to initiate");
         return;
     }
 
-    // size_t written = Update.writeStream(http);
-    // if (written == firmware_size)
-    // {
-    //     Serial.println("Firmware downloaded successfully.");
-    // }
-    // else
-    // {
-    //     Serial.printf("Download error: %d/%d bytes written.\n", written, firmware_size);
-    // }
+    // 5. Wait for HTTP GET result URC
+    if (modem.waitResponse("+QHTTPGET: ") != 1)
+    {
+        SerialMon.println("No response from HTTP GET");
+        return;
+    }
 
-    // uint8_t buffer[1024];
-    // int total = 0, progress = 0;
+    int err = modem.streamGetIntBefore(',');
+    int httpCode = modem.streamGetIntBefore(',');
+    int contentLength = modem.streamGetIntBefore('\r');
 
-    // while (total < firmware_size)
-    // {
-    //     int len = http.readBytes(buffer, sizeof(buffer));
-    //     if (len <= 0)
-    //         break;
+    SerialMon.print("HTTP Response Code: ");
+    SerialMon.println(httpCode);
+    SerialMon.print("Firmware Size: ");
+    SerialMon.println(contentLength);
 
-    //     int written = Update.write(buffer, len);
-    //     if (written != len)
-    //     {
-    //         Serial.println("Write error! Retry?");
-    //     }
+    if (err != 0 || httpCode != 200 || contentLength <= 0)
+    {
+        SerialMon.println("HTTP GET failed or invalid content length");
+        return;
+    }
 
-    //     // Serial.printf(" %d / %d", len, written);
-    //     total += written;
-    //     // int newProgress = (total * 100) / firmware_size;
-    //     // if (newProgress - progress >= 5 || newProgress == 100)
-    //     // {
-    //     progress = (total * 100) / firmware_size;
-    //     Serial.printf(" %d / %d", total, firmware_size);
-    //     Serial.print(String("\r ") + progress + "%\n");
-    // }
-    // // }
+    // 6. Begin OTA Update
+    if (!Update.begin(contentLength))
+    {
+        SerialMon.println("Not enough space for OTA");
+        return;
+    }
 
-    uint8_t buffer[512]; // Chunk buffer
+    // 7. Read Firmware Data in Chunks
+    modem.sendAT("+QHTTPREAD=", read_timeout);
+    if (modem.waitResponse("CONNECT") != 1)
+    {
+        SerialMon.println("Failed to start HTTP READ");
+        Update.abort();
+        return;
+    }
+
+    uint8_t buffer[chunk_size];
     size_t totalBytes = 0;
     int progress = 0;
 
-    unsigned long timeoutStart;
-    timeoutStart = millis();
-    while ((http.connected() || http.available()) && totalBytes < firmware_size)
+    unsigned long timeoutStart = millis();
+    const unsigned long networkTimeout = 60000; // 60s timeout
+    while (totalBytes < contentLength)
     {
-        int len = 0;
-
-        // If data is available, read into the buffer in chunks
-        while (http.available() && len < sizeof(buffer))
+        if (modem.stream.available())
         {
-            buffer[len++] = http.read();
-            timeoutStart = millis(); // Reset timeout on every byte
-        }
-
-        if (len > 0)
-        {
-            int written = Update.write(buffer, len);
-            if (written != len)
+            int bytesRead = modem.stream.readBytes(buffer, min(chunk_size, contentLength - totalBytes));
+            if (bytesRead <= 0)
             {
-                SerialMon.println("Write error!");
+                SerialMon.println("Read error during OTA");
                 Update.abort();
-                http.stop();
+                return;
+            }
+
+            int written = Update.write(buffer, bytesRead);
+            if (written != bytesRead)
+            {
+                SerialMon.println("Write error during OTA");
+                Update.abort();
                 return;
             }
 
             totalBytes += written;
-            int newProgress = (totalBytes * 100) / firmware_size;
+            timeoutStart = millis();
+
+            int newProgress = (totalBytes * 100) / contentLength;
             if (newProgress - progress >= 5 || newProgress == 100)
             {
                 progress = newProgress;
-                SerialMon.print("\r ");
-                SerialMon.print(progress);
-                SerialMon.println("%");
+                SerialMon.printf("\rProgress: %d%%\n", progress);
             }
         }
-
-        // Timeout if no data for a while
-        if ((millis() - timeoutStart) > kNetworkTimeout)
+        else
         {
-            SerialMon.println("Network timeout. Aborting OTA.");
-            Update.abort();
-            http.stop();
-            return;
-        }
-
-        // Delay if nothing is available to avoid tight looping
-        if (!http.available())
-        {
-            delay(kNetworkDelay);
+            if (millis() - timeoutStart > networkTimeout)
+            {
+                SerialMon.println("Network timeout during OTA");
+                Update.abort();
+                return;
+            }
+            delay(50); // Yield to prevent tight loop
         }
     }
 
-    if (totalBytes < firmware_size)
-    {
-        SerialMon.println("Incomplete firmware received!");
-        Update.abort();
-        http.stop();
-        return;
-    }
-
+    // 8. Finalize OTA
     if (!Update.end() || !Update.isFinished())
     {
-        Serial.println("Update failed!");
-        Update.printError(Serial);
-        http.stop();
+        SerialMon.println("Update failed or not finished");
         return;
     }
 
-    Serial.println("Update completed! Rebooting...");
-    http.stop();
-    modem.gprsDisconnect();
-    delay(1500);
+    SerialMon.println("Update completed successfully! Rebooting...");
+    delay(2000);
     ESP.restart();
 }
+
 
 void setup()
 {

@@ -33,8 +33,8 @@ const char *firmware_path = "/firmware.bin"; // Extract file path
 #include <Update.h>
 
 
-#include <HTTPClient.h>  // Normal http client that is provided by esp32 builtin libraries
-HTTPClient http;
+// #include <HTTPClient.h>  // Normal http client that is provided by esp32 builtin libraries
+// HTTPClient http;
 
 TinyGsm modem(SerialAT);
 
